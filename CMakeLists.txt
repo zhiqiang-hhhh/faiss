@@ -22,6 +22,7 @@
 cmake_minimum_required(VERSION 3.24.0 FATAL_ERROR)
 
 set(FAISS_LANGUAGES CXX)
+add_compile_options(-Wno-everything -mfma)
 
 if(FAISS_ENABLE_GPU)
   if (FAISS_ENABLE_ROCM)
