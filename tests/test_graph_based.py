@@ -66,7 +66,7 @@ class TestHNSW(unittest.TestCase):
 
         index = faiss.IndexHNSWFlat(d, 16)
         index.add(self.xb)
-        index.search_bounded_queue = False
+        index.hnsw.search_bounded_queue = False
         Dhnsw, Ihnsw = index.search(self.xq, 1)
 
         self.assertGreaterEqual((self.Iref == Ihnsw).sum(), 460)
@@ -217,6 +217,7 @@ class TestHNSW(unittest.TestCase):
         self.assertEqual(index_flat.ntotal, 0)
         self.assertEqual(index_hnsw.ntotal, 0)
 
+
 class Issue3684(unittest.TestCase):
 
     def test_issue3684(self):
@@ -235,11 +236,11 @@ class Issue3684(unittest.TestCase):
         hnsw_index_ip.hnsw.efSearch = 512
         hnsw_index_ip.add(xb)
 
-        # test knn 
+        # test knn
         D, I = hnsw_index_ip.search(xq, 10)
         self.assertTrue(np.all(D[:, :-1] >= D[:, 1:]))
 
-        # test range search 
+        # test range search
         radius = 0.74  # Cosine similarity threshold
         lims, D, I = hnsw_index_ip.range_search(xq, radius)
         self.assertTrue(np.all(D >= radius))
