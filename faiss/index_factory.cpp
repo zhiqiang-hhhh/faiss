@@ -482,6 +482,9 @@ IndexHNSW* parse_IndexHNSW(
     if (match(sq_pattern)) {
         return new IndexHNSWSQ(d, sq_types[sm[1].str()], hnsw_M, mt);
     }
+    if (match(rabitq_pattern)) {
+        return new IndexHNSWRaBitQ(d, hnsw_M, mt);
+    }
     if (match("([0-9]+)\\+PQ([0-9]+)?")) {
         int ncent = mres_to_int(sm[1]);
         int pq_m = mres_to_int(sm[2]);

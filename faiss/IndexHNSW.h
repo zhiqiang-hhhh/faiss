@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <vector>
 #include "faiss/Index.h"
 
@@ -149,6 +150,38 @@ struct IndexHNSWSQ : IndexHNSW {
             ScalarQuantizer::QuantizerType qtype,
             int M,
             MetricType metric = METRIC_L2);
+};
+
+struct SearchParametersHNSWRaBitQ : SearchParametersHNSW {
+    uint8_t qb = 0;
+    bool centered = false;
+};
+
+struct IndexHNSWRaBitQ : IndexHNSW {
+    IndexHNSWRaBitQ();
+    IndexHNSWRaBitQ(
+            int d,
+            int M,
+            MetricType metric = METRIC_L2);
+
+    void set_query_quantization(uint8_t qb, bool centered);
+
+    void train(idx_t n, const float* x) override;
+
+    void search(
+            idx_t n,
+            const float* x,
+            idx_t k,
+            float* distances,
+            idx_t* labels,
+            const SearchParameters* params = nullptr) const override;
+
+    void range_search(
+            idx_t n,
+            const float* x,
+            float radius,
+            RangeSearchResult* result,
+            const SearchParameters* params = nullptr) const override;
 };
 
 /** 2-level code structure with fast random access

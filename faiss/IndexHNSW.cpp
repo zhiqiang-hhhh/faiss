@@ -24,6 +24,7 @@
 #include <faiss/Index2Layer.h>
 #include <faiss/IndexFlat.h>
 #include <faiss/IndexIVFPQ.h>
+#include <faiss/IndexRaBitQ.h>
 #include <faiss/impl/AuxIndexStructures.h>
 #include <faiss/impl/FaissAssert.h>
 #include <faiss/impl/ResultHandler.h>
@@ -50,6 +51,74 @@ DistanceComputer* storage_distance_computer(const Index* storage) {
     } else {
         return storage->get_distance_computer();
     }
+}
+
+template <class BlockResultHandler, class DistanceComputerFactory>
+void hnsw_search_impl(
+        const IndexHNSW* index,
+        idx_t n,
+        const float* x,
+        BlockResultHandler& bres,
+        const SearchParameters* params,
+        DistanceComputerFactory&& distance_factory) {
+    FAISS_THROW_IF_NOT_MSG(
+            index->storage,
+            "No storage index, please use IndexHNSWFlat (or variants) "
+            "instead of IndexHNSW directly");
+    const HNSW& hnsw = index->hnsw;
+
+    int efSearch = hnsw.efSearch;
+    if (params) {
+        if (const SearchParametersHNSW* hnsw_params =
+                    dynamic_cast<const SearchParametersHNSW*>(params)) {
+            efSearch = hnsw_params->efSearch;
+        }
+    }
+    size_t n1 = 0, n2 = 0, ndis = 0, nhops = 0;
+
+    idx_t check_period = InterruptCallback::get_period_hint(
+            hnsw.max_level * index->d * efSearch);
+
+    for (idx_t i0 = 0; i0 < n; i0 += check_period) {
+        idx_t i1 = std::min(i0 + check_period, n);
+
+#pragma omp parallel if (i1 - i0 > 1)
+        {
+            VisitedTable vt(index->ntotal);
+            typename BlockResultHandler::SingleResultHandler res(bres);
+
+            std::unique_ptr<DistanceComputer> dis(distance_factory());
+
+#pragma omp for reduction(+ : n1, n2, ndis, nhops) schedule(guided)
+            for (idx_t i = i0; i < i1; i++) {
+                res.begin(i);
+                dis->set_query(x + i * index->d);
+
+                HNSWStats stats = hnsw.search(*dis, res, vt, params);
+                n1 += stats.n1;
+                n2 += stats.n2;
+                ndis += stats.ndis;
+                nhops += stats.nhops;
+                res.end();
+            }
+        }
+        InterruptCallback::check();
+    }
+
+    hnsw_stats.combine({n1, n2, ndis, nhops});
+}
+
+template <class BlockResultHandler>
+void hnsw_search(
+        const IndexHNSW* index,
+        idx_t n,
+        const float* x,
+        BlockResultHandler& bres,
+        const SearchParameters* params) {
+    auto default_factory = [index]() {
+        return storage_distance_computer(index->storage);
+    };
+    hnsw_search_impl(index, n, x, bres, params, default_factory);
 }
 
 void hnsw_add_vertices(
@@ -232,65 +301,6 @@ void IndexHNSW::train(idx_t n, const float* x) {
     storage->train(n, x);
     is_trained = true;
 }
-
-namespace {
-
-template <class BlockResultHandler>
-void hnsw_search(
-        const IndexHNSW* index,
-        idx_t n,
-        const float* x,
-        BlockResultHandler& bres,
-        const SearchParameters* params) {
-    FAISS_THROW_IF_NOT_MSG(
-            index->storage,
-            "No storage index, please use IndexHNSWFlat (or variants) "
-            "instead of IndexHNSW directly");
-    const HNSW& hnsw = index->hnsw;
-
-    int efSearch = hnsw.efSearch;
-    if (params) {
-        if (const SearchParametersHNSW* hnsw_params =
-                    dynamic_cast<const SearchParametersHNSW*>(params)) {
-            efSearch = hnsw_params->efSearch;
-        }
-    }
-    size_t n1 = 0, n2 = 0, ndis = 0, nhops = 0;
-
-    idx_t check_period = InterruptCallback::get_period_hint(
-            hnsw.max_level * index->d * efSearch);
-
-    for (idx_t i0 = 0; i0 < n; i0 += check_period) {
-        idx_t i1 = std::min(i0 + check_period, n);
-
-#pragma omp parallel if (i1 - i0 > 1)
-        {
-            VisitedTable vt(index->ntotal);
-            typename BlockResultHandler::SingleResultHandler res(bres);
-
-            std::unique_ptr<DistanceComputer> dis(
-                    storage_distance_computer(index->storage));
-
-#pragma omp for reduction(+ : n1, n2, ndis, nhops) schedule(guided)
-            for (idx_t i = i0; i < i1; i++) {
-                res.begin(i);
-                dis->set_query(x + i * index->d);
-
-                HNSWStats stats = hnsw.search(*dis, res, vt, params);
-                n1 += stats.n1;
-                n2 += stats.n2;
-                ndis += stats.ndis;
-                nhops += stats.nhops;
-                res.end();
-            }
-        }
-        InterruptCallback::check();
-    }
-
-    hnsw_stats.combine({n1, n2, ndis, nhops});
-}
-
-} // anonymous namespace
 
 void IndexHNSW::search(
         idx_t n,
@@ -684,6 +694,140 @@ IndexHNSWSQ::IndexHNSWSQ(
 }
 
 IndexHNSWSQ::IndexHNSWSQ() = default;
+
+/**************************************************************
+ * IndexHNSWRaBitQ implementation
+ **************************************************************/
+
+IndexHNSWRaBitQ::IndexHNSWRaBitQ(
+        int d,
+        int M,
+        MetricType metric)
+        : IndexHNSW(new IndexRaBitQ(d, metric), M) {
+    own_fields = true;
+    is_trained = this->storage->is_trained;
+}
+
+IndexHNSWRaBitQ::IndexHNSWRaBitQ() = default;
+
+void IndexHNSWRaBitQ::set_query_quantization(uint8_t qb, bool centered) {
+    auto* storage_rabitq = dynamic_cast<IndexRaBitQ*>(storage);
+    FAISS_THROW_IF_NOT_MSG(
+            storage_rabitq,
+            "IndexHNSWRaBitQ expects IndexRaBitQ storage");
+    storage_rabitq->qb = qb;
+    storage_rabitq->centered = centered;
+}
+
+void IndexHNSWRaBitQ::train(idx_t n, const float* x) {
+    IndexHNSW::train(n, x);
+    is_trained = true;
+}
+
+namespace {
+
+template <class BlockResultHandler>
+void hnsw_search_rabitq(
+        const IndexHNSWRaBitQ* index,
+        idx_t n,
+        const float* x,
+        BlockResultHandler& bres,
+        const SearchParameters* params,
+        uint8_t qb,
+        bool centered) {
+    const auto* storage_rabitq =
+            dynamic_cast<const IndexRaBitQ*>(index->storage);
+    FAISS_THROW_IF_NOT_MSG(
+            storage_rabitq,
+            "IndexHNSWRaBitQ expects IndexRaBitQ storage");
+
+    auto factory = [storage_rabitq, qb, centered]() {
+        return storage_rabitq->get_quantized_distance_computer(qb, centered);
+    };
+
+    hnsw_search_impl(index, n, x, bres, params, factory);
+}
+
+} // namespace
+
+void IndexHNSWRaBitQ::search(
+        idx_t n,
+        const float* x,
+        idx_t k,
+        float* distances,
+        idx_t* labels,
+        const SearchParameters* params) const {
+    FAISS_THROW_IF_NOT(k > 0);
+
+    const auto* storage_rabitq =
+            dynamic_cast<const IndexRaBitQ*>(storage);
+    FAISS_THROW_IF_NOT_MSG(
+            storage_rabitq,
+            "IndexHNSWRaBitQ expects IndexRaBitQ storage");
+
+    uint8_t qb = storage_rabitq->qb;
+    bool centered = storage_rabitq->centered;
+    if (params) {
+        if (const auto* rabit_params =
+                    dynamic_cast<const SearchParametersHNSWRaBitQ*>(params)) {
+            qb = rabit_params->qb;
+            centered = rabit_params->centered;
+        } else if (
+                const auto* base_params =
+                        dynamic_cast<const RaBitQSearchParameters*>(params)) {
+            qb = base_params->qb;
+            centered = base_params->centered;
+        }
+    }
+
+    using RH = HeapBlockResultHandler<HNSW::C>;
+    RH bres(n, distances, labels, k);
+    hnsw_search_rabitq(this, n, x, bres, params, qb, centered);
+
+    if (is_similarity_metric(this->metric_type)) {
+        for (size_t i = 0; i < k * n; i++) {
+            distances[i] = -distances[i];
+        }
+    }
+}
+
+void IndexHNSWRaBitQ::range_search(
+        idx_t n,
+        const float* x,
+        float radius,
+        RangeSearchResult* result,
+        const SearchParameters* params) const {
+    const auto* storage_rabitq =
+            dynamic_cast<const IndexRaBitQ*>(storage);
+    FAISS_THROW_IF_NOT_MSG(
+            storage_rabitq,
+            "IndexHNSWRaBitQ expects IndexRaBitQ storage");
+
+    uint8_t qb = storage_rabitq->qb;
+    bool centered = storage_rabitq->centered;
+    if (params) {
+        if (const auto* rabit_params =
+                    dynamic_cast<const SearchParametersHNSWRaBitQ*>(params)) {
+            qb = rabit_params->qb;
+            centered = rabit_params->centered;
+        } else if (
+                const auto* base_params =
+                        dynamic_cast<const RaBitQSearchParameters*>(params)) {
+            qb = base_params->qb;
+            centered = base_params->centered;
+        }
+    }
+
+    using RH = RangeSearchBlockResultHandler<HNSW::C>;
+    RH bres(result, is_similarity_metric(metric_type) ? -radius : radius);
+    hnsw_search_rabitq(this, n, x, bres, params, qb, centered);
+
+    if (is_similarity_metric(this->metric_type)) {
+        for (size_t i = 0; i < result->lims[result->nq]; i++) {
+            result->distances[i] = -result->distances[i];
+        }
+    }
+}
 
 /**************************************************************
  * IndexHNSW2Level implementation

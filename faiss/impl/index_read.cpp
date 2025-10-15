@@ -1099,7 +1099,8 @@ Index* read_index(IOReader* f, int io_flags) {
         idx = idxp;
     } else if (
             h == fourcc("IHNf") || h == fourcc("IHNp") || h == fourcc("IHNs") ||
-            h == fourcc("IHN2") || h == fourcc("IHNc") || h == fourcc("IHc2")) {
+            h == fourcc("IHNr") || h == fourcc("IHN2") ||
+            h == fourcc("IHNc") || h == fourcc("IHc2")) {
         IndexHNSW* idxhnsw = nullptr;
         if (h == fourcc("IHNf")) {
             idxhnsw = new IndexHNSWFlat();
@@ -1109,6 +1110,9 @@ Index* read_index(IOReader* f, int io_flags) {
         }
         if (h == fourcc("IHNs")) {
             idxhnsw = new IndexHNSWSQ();
+        }
+        if (h == fourcc("IHNr")) {
+            idxhnsw = new IndexHNSWRaBitQ();
         }
         if (h == fourcc("IHN2")) {
             idxhnsw = new IndexHNSW2Level();

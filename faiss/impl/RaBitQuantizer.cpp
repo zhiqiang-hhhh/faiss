@@ -177,6 +177,11 @@ struct RaBitDistanceComputer : FlatCodesDistanceComputer {
     // the metric
     MetricType metric_type = MetricType::METRIC_L2;
 
+    const RaBitQuantizer* quantizer = nullptr;
+
+    mutable std::vector<float> tmp_a;
+    mutable std::vector<float> tmp_b;
+
     RaBitDistanceComputer();
 
     float symmetric_dis(idx_t i, idx_t j) override;
@@ -185,7 +190,22 @@ struct RaBitDistanceComputer : FlatCodesDistanceComputer {
 RaBitDistanceComputer::RaBitDistanceComputer() = default;
 
 float RaBitDistanceComputer::symmetric_dis(idx_t i, idx_t j) {
-    FAISS_THROW_MSG("Not implemented");
+    FAISS_THROW_IF_NOT_MSG(quantizer, "quantizer pointer not set");
+
+    tmp_a.resize(d);
+    tmp_b.resize(d);
+
+    const uint8_t* code_i = codes + i * code_size;
+    const uint8_t* code_j = codes + j * code_size;
+
+    quantizer->decode_core(code_i, tmp_a.data(), 1, centroid);
+    quantizer->decode_core(code_j, tmp_b.data(), 1, centroid);
+
+    if (metric_type == MetricType::METRIC_L2) {
+        return fvec_L2sqr(tmp_a.data(), tmp_b.data(), d);
+    } else {
+        return -fvec_inner_product(tmp_a.data(), tmp_b.data(), d);
+    }
 }
 
 struct RaBitDistanceComputerNotQ : RaBitDistanceComputer {
@@ -498,6 +518,7 @@ FlatCodesDistanceComputer* RaBitQuantizer::get_distance_computer(
         dc->metric_type = metric_type;
         dc->d = d;
         dc->centroid = centroid_in;
+        dc->quantizer = this;
 
         return dc.release();
     } else {
@@ -507,6 +528,7 @@ FlatCodesDistanceComputer* RaBitQuantizer::get_distance_computer(
         dc->centroid = centroid_in;
         dc->qb = qb;
         dc->centered = centered;
+        dc->quantizer = this;
 
         return dc.release();
     }
